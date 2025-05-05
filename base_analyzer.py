@@ -25,7 +25,7 @@ GEMINI_MODEL = "gemini-2.0-flash"
 def setup_gemini_client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
-def analyze_image_with_gemini(client: genai.Client, image_path: str, country: str, model_name: str = GEMINI_MODEL) -> Optional[str]:
+def analyze_image_with_gemini(client: genai.Client, image_path: str, country: str, model_name: str = GEMINI_MODEL, history: Optional[list] = None) -> Optional[dict]:
     try:
         if not os.path.exists(image_path):
             print(f"❌ Image file not found: {image_path}")
@@ -34,7 +34,7 @@ def analyze_image_with_gemini(client: genai.Client, image_path: str, country: st
         uploaded_file = client.files.upload(file=image_path)
         print("✅ Uploaded image:", uploaded_file)
 
-        prompt = (
+        base_prompt = (
             f"You are an expert in understanding satellite imagery and you work for the US army. "
             f"We got intel that this area is a base/facility of the military of {country}. "
             f"Analyze this image and respond ONLY with a JSON object containing the following keys:\n\n"
@@ -45,9 +45,17 @@ def analyze_image_with_gemini(client: genai.Client, image_path: str, country: st
             f"based on what would help you analyze the image or area better."
         )
 
+        if history:
+            history_prompt = ("\n\nHere is the analysis of previous analysts about this area and their recommendations. "
+                              "You can use this data but don’t use it as fact, think for yourself:\n" +
+                              json.dumps(history, indent=2))
+            full_prompt = base_prompt + history_prompt
+        else:
+            full_prompt = base_prompt
+
         response = client.models.generate_content(
             model=model_name,
-            contents=[uploaded_file, prompt],
+            contents=[uploaded_file, full_prompt],
         )
 
 
@@ -126,7 +134,6 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
         distance = 5000
         tilt = 35
         heading = 0
-        loop_count = 0  # To limit the number of iterations per base, if needed
 
         for index, row in df.head(num_rows).iterrows():
             try:
@@ -138,10 +145,12 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
 
                 print(f"\nProcessing Row {index + 1}: Country={country}, Lat={lat}, Lon={lon}")
 
-                while loop_count < 8:  # Limit iterations to 8 for each base (as per your request)
+                loop_count = 0
+                analyst_history = []
+
+                while loop_count < 8:
                     loop_count += 1
 
-                    # Generate the URL with current zoom level and other parameters
                     earth_url = generate_google_earth_url(lat, lon, altitude, distance, tilt, heading)
                     print(f"Opening Google Earth: {earth_url}")
                     driver.get(earth_url)
@@ -152,7 +161,7 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
                     take_screenshot(driver, screenshot_filepath)
 
                     print("Sending to Gemini for analysis...")
-                    response = analyze_image_with_gemini(gemini_client, screenshot_filepath, country)
+                    response = analyze_image_with_gemini(gemini_client, screenshot_filepath, country, history=analyst_history if loop_count > 1 else None)
 
                     if response:
                         print("\n--- GEMINI ANALYSIS ---")
