@@ -26,12 +26,23 @@ def setup_gemini_client(api_key: str) -> genai.Client:
 
 def analyze_image_with_gemini(client: genai.Client, image_path: str, country: str, model_name: str = GEMINI_MODEL) -> Optional[str]:
     try:
+        if not os.path.exists(image_path):
+            print(f"❌ Image file not found: {image_path}")
+            return None
+
         uploaded_file = client.files.upload(file=image_path)
         prompt = (
             f"You are an expert in understanding satellite imagery and you work for the US army. "
             f"We got intel that this area is a base/facility of the military of {country}. "
-            f"Analyze this image, try to find military devices, structures etc and tell me your findings."
+            f"Analyze this image and respond ONLY with a JSON object containing the following keys:\n\n"
+            f"1. 'findings': A list of findings that you think are important for the US army to know, including all man-made structures, military equipment, and infrastructure. "
+            f"We are trying to find which systems, weapons, or equipment are present so focus on that.\n"
+            f"2. 'analysis': A detailed analysis of your findings.\n"
+            f"3. 'things_to_continue_analyzing': A list of things that you think are important to continue analyzing in further images.\n"
+            f"4. 'action': One of ['zoom-in', 'zoom-out', 'move-left', 'move-right', 'finish'] "
+            f"based on what would help you analyze the image or area better."
         )
+
         response = client.models.generate_content(
             model=model_name,
             contents=[uploaded_file, prompt],
@@ -50,7 +61,9 @@ def setup_driver() -> webdriver.Chrome:
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    # Headless OFF for debugging
+    chrome_options.add_argument("--use-gl=desktop")
+    chrome_options.add_argument("--enable-unsafe-webgpu")
+    chrome_options.add_argument("--ignore-gpu-blocklist")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=chrome_options)
 
@@ -105,7 +118,6 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
                 base_name_part = row.get('name', f'Base_{index+1}')
                 safe_name_part = quote(base_name_part.replace(" ", "_"), safe='')
 
-
                 print(f"\nProcessing Row {index + 1}: Country={country}, Lat={lat}, Lon={lon}")
 
                 earth_url = generate_google_earth_url(lat, lon)
@@ -114,6 +126,8 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
 
                 screenshot_filename = f"{country}_{safe_name_part}_({lat:.4f},{lon:.4f}).png"
                 screenshot_filepath = os.path.join(screenshot_dir, screenshot_filename)
+
+                take_screenshot(driver, screenshot_filepath)
 
                 print("Sending to Gemini for analysis...")
                 response = analyze_image_with_gemini(gemini_client, screenshot_filepath, country)
