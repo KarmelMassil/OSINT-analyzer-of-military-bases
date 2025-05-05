@@ -1,40 +1,60 @@
 import os
 import time
-# import requests # No longer needed for downloading
 import pandas as pd
+from urllib.parse import quote
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from urllib.parse import quote # To handle potential special characters in names
+from google import genai
+from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- Constants ---
-# CSV_URL = "..." # No longer needed
 CSV_FILENAME = "military_bases.csv" # Assumes this file exists in the script's directory
-ROWS_TO_PROCESS = 5
+ROWS_TO_PROCESS = 1
 SCREENSHOT_DIR = "base_screenshots"
-GOOGLE_EARTH_WAIT_TIME = 15 # Seconds to wait for Google Earth to load
+GOOGLE_EARTH_WAIT_TIME = 15
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-2.0-flash"
 
-# --- Functions ---
+# --- Gemini Helper Functions ---
+def setup_gemini_client(api_key: str) -> genai.Client:
+    return genai.Client(api_key=api_key)
 
-# download_csv function removed as it's no longer needed
+def analyze_image_with_gemini(client: genai.Client, image_path: str, country: str, model_name: str = GEMINI_MODEL) -> Optional[str]:
+    try:
+        uploaded_file = client.files.upload(file=image_path)
+        prompt = (
+            f"You are an expert in understanding satellite imagery and you work for the US army. "
+            f"We got intel that this area is a base/facility of the military of {country}. "
+            f"Analyze this image, try to find military devices, structures etc and tell me your findings."
+        )
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[uploaded_file, prompt],
+        )
+        return response.text
+    except Exception as e:
+        print(f"❌ Error during Gemini analysis: {e}")
+        return None
 
+# --- WebDriver Setup ---
 def setup_driver() -> webdriver.Chrome:
     """Sets up the Selenium Chrome WebDriver."""
     print("Setting up Chrome WebDriver...")
     chrome_options = Options()
-    # Headless mode is OFF by default
-    # chrome_options.add_argument("--headless") # Keep commented out for debugging
     chrome_options.add_argument("--start-maximized")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-
+    # Headless OFF for debugging
     service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    print("WebDriver setup complete.")
-    return driver
+    return webdriver.Chrome(service=service, options=chrome_options)
 
+# --- Google Earth URL Generator ---
 def generate_google_earth_url(lat: float, lon: float) -> str:
     """
     Generates a Google Earth URL for the given latitude and longitude.
@@ -43,43 +63,40 @@ def generate_google_earth_url(lat: float, lon: float) -> str:
     altitude = 1000  # meters (approx)
     distance = 5000  # meters
     tilt = 35        # degrees
-    heading = 0      # degrees (0=North)
+    heading = 0      # North
+    return f"https://earth.google.com/web/@{lat:.6f},{lon:.6f},{altitude}a,{distance}d,{tilt}y,{heading}h"
 
-    url = f"https://earth.google.com/web/@{lat:.6f},{lon:.6f},{altitude}a,{distance}d,{tilt}y,{heading}h"
-    return url
-
+# --- Screenshot Logic ---
 def take_screenshot(driver: webdriver.Chrome, filepath: str):
-    """Takes a screenshot and saves it to the specified path after waiting."""
-    try:
-        print(f"Waiting {GOOGLE_EARTH_WAIT_TIME} seconds for Google Earth to load...")
-        time.sleep(GOOGLE_EARTH_WAIT_TIME)
-        print(f"Taking screenshot: {filepath}")
-        driver.save_screenshot(filepath)
-        print("Screenshot saved.")
-    except Exception as e:
-        print(f"Error taking screenshot for {filepath}: {e}")
+    """
+    Takes a screenshot of the current Google Earth view and saves it to the specified filepath.
+    """
+    print(f"Waiting {GOOGLE_EARTH_WAIT_TIME} seconds for Google Earth to load...")
+    time.sleep(GOOGLE_EARTH_WAIT_TIME)
+    print(f"Taking screenshot: {filepath}")
+    driver.save_screenshot(filepath)
+    print("Screenshot saved.")
 
-def process_bases(csv_path: str, num_rows: int, screenshot_dir: str):
-    """Reads the CSV, opens Google Earth for each base, and takes screenshots."""
-    # Check if the pre-downloaded CSV file exists
+# --- Main Processing Function ---
+def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_client: genai.Client):
+    """
+    Processes the CSV file containing military base coordinates, takes screenshots of Google Earth views
+    for each base, and sends the screenshots to Gemini for analysis.
+    """
     if not os.path.exists(csv_path):
-        print(f"Error: CSV file not found at '{csv_path}'.")
-        print("Please make sure 'military_bases.csv' is in the same directory as the script.")
+        print(f"CSV file not found: {csv_path}")
         return
 
-    print(f"Processing the first {num_rows} rows from '{csv_path}'...")
-    driver = None
+    df = pd.read_csv(csv_path)
+
+    if 'latitude' not in df.columns or 'longitude' not in df.columns:
+        print("CSV must contain 'latitude' and 'longitude' columns.")
+        return
+
+    os.makedirs(screenshot_dir, exist_ok=True)
+    driver = setup_driver()
+
     try:
-        df = pd.read_csv(csv_path)
-
-        if 'latitude' not in df.columns or 'longitude' not in df.columns:
-            print("Error: CSV must contain 'latitude' and 'longitude' columns.")
-            return
-
-        driver = setup_driver()
-        os.makedirs(screenshot_dir, exist_ok=True)
-        print(f"Screenshots will be saved in '{screenshot_dir}'")
-
         for index, row in df.head(num_rows).iterrows():
             try:
                 lat = float(row['latitude'])
@@ -98,28 +115,26 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str):
                 screenshot_filename = f"{country}_{safe_name_part}_({lat:.4f},{lon:.4f}).png"
                 screenshot_filepath = os.path.join(screenshot_dir, screenshot_filename)
 
-                take_screenshot(driver, screenshot_filepath)
+                print("Sending to Gemini for analysis...")
+                response = analyze_image_with_gemini(gemini_client, screenshot_filepath, country)
+                if response:
+                    print("\n--- GEMINI ANALYSIS ---")
+                    print(response)
+                    print("------------------------\n")
+                else:
+                    print("⚠️ No response from Gemini.")
 
             except ValueError as ve:
-                print(f"Skipping row {index + 1} due to invalid latitude/longitude: {ve}")
-                continue
+                print(f"Invalid coordinates on row {index+1}: {ve}")
             except Exception as e:
-                print(f"An error occurred processing row {index + 1}: {e}")
+                print(f"Error processing row {index+1}: {e}")
 
-    except pd.errors.EmptyDataError:
-        print(f"Error: The CSV file '{csv_path}' is empty.")
-    except FileNotFoundError: # Should be caught by the initial check, but good practice
-        print(f"Error: Could not find the CSV file '{csv_path}'.")
-    except Exception as e:
-        print(f"An unexpected error occurred during processing: {e}")
     finally:
-        if driver:
-            print("\nClosing WebDriver.")
-            driver.quit()
-        print("Processing finished.")
+        print("Closing WebDriver.")
+        driver.quit()
 
-# --- Main Execution ---
+# --- Main ---
 if __name__ == "__main__":
-    # Directly process the bases, assuming the CSV file exists locally
-    print(f"Script started. Assuming '{CSV_FILENAME}' exists locally.")
-    process_bases(CSV_FILENAME, ROWS_TO_PROCESS, SCREENSHOT_DIR)
+    print("Starting military base analyzer...")
+    gemini_client = setup_gemini_client(GEMINI_API_KEY)
+    process_bases(CSV_FILENAME, ROWS_TO_PROCESS, SCREENSHOT_DIR, gemini_client)
