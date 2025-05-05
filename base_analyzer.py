@@ -9,6 +9,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from google import genai
 from typing import Optional
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -31,12 +32,13 @@ def analyze_image_with_gemini(client: genai.Client, image_path: str, country: st
             return None
 
         uploaded_file = client.files.upload(file=image_path)
+        print("✅ Uploaded image:", uploaded_file)
+
         prompt = (
             f"You are an expert in understanding satellite imagery and you work for the US army. "
             f"We got intel that this area is a base/facility of the military of {country}. "
             f"Analyze this image and respond ONLY with a JSON object containing the following keys:\n\n"
             f"1. 'findings': A list of findings that you think are important for the US army to know, including all man-made structures, military equipment, and infrastructure. "
-            f"We are trying to find which systems, weapons, or equipment are present so focus on that.\n"
             f"2. 'analysis': A detailed analysis of your findings.\n"
             f"3. 'things_to_continue_analyzing': A list of things that you think are important to continue analyzing in further images.\n"
             f"4. 'action': One of ['zoom-in', 'zoom-out', 'move-left', 'move-right', 'finish'] "
@@ -47,7 +49,20 @@ def analyze_image_with_gemini(client: genai.Client, image_path: str, country: st
             model=model_name,
             contents=[uploaded_file, prompt],
         )
-        return response.text
+
+
+        # Extract text from the response correctly
+        raw_text = response.candidates[0].content.parts[0].text.strip("```json\n").strip("```").strip()
+
+        # Try parsing the cleaned JSON
+        try:
+            parsed_response = json.loads(raw_text)
+            print("Parsed Gemini response:", parsed_response)
+            return parsed_response
+        except json.JSONDecodeError as e:
+            print(f"❌ Error parsing JSON response: {e}")
+            return None
+
     except Exception as e:
         print(f"❌ Error during Gemini analysis: {e}")
         return None
@@ -68,15 +83,11 @@ def setup_driver() -> webdriver.Chrome:
     return webdriver.Chrome(service=service, options=chrome_options)
 
 # --- Google Earth URL Generator ---
-def generate_google_earth_url(lat: float, lon: float) -> str:
+def generate_google_earth_url(lat: float, lon: float, altitude: float, distance: float, tilt: float, heading: float) -> str:
     """
-    Generates a Google Earth URL for the given latitude and longitude.
-    Includes parameters for a reasonable starting view (altitude, distance, tilt).
+    Generates a Google Earth URL for the given latitude and longitude with dynamic parameters
+    for zoom level, tilt, and heading.
     """
-    altitude = 1000  # meters (approx)
-    distance = 5000  # meters
-    tilt = 35        # degrees
-    heading = 0      # North
     return f"https://earth.google.com/web/@{lat:.6f},{lon:.6f},{altitude}a,{distance}d,{tilt}y,{heading}h"
 
 # --- Screenshot Logic ---
@@ -94,7 +105,7 @@ def take_screenshot(driver: webdriver.Chrome, filepath: str):
 def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_client: genai.Client):
     """
     Processes the CSV file containing military base coordinates, takes screenshots of Google Earth views
-    for each base, and sends the screenshots to Gemini for analysis.
+    for each base, and sends the screenshots to Gemini for analysis. This function will loop, repeating actions.
     """
     if not os.path.exists(csv_path):
         print(f"CSV file not found: {csv_path}")
@@ -110,6 +121,13 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
     driver = setup_driver()
 
     try:
+        current_zoom = 1000  # initial zoom level
+        altitude = current_zoom
+        distance = 5000
+        tilt = 35
+        heading = 0
+        loop_count = 0  # To limit the number of iterations per base, if needed
+
         for index, row in df.head(num_rows).iterrows():
             try:
                 lat = float(row['latitude'])
@@ -120,23 +138,46 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
 
                 print(f"\nProcessing Row {index + 1}: Country={country}, Lat={lat}, Lon={lon}")
 
-                earth_url = generate_google_earth_url(lat, lon)
-                print(f"Opening Google Earth: {earth_url}")
-                driver.get(earth_url)
+                while loop_count < 8:  # Limit iterations to 8 for each base (as per your request)
+                    loop_count += 1
 
-                screenshot_filename = f"{country}_{safe_name_part}_({lat:.4f},{lon:.4f}).png"
-                screenshot_filepath = os.path.join(screenshot_dir, screenshot_filename)
+                    # Generate the URL with current zoom level and other parameters
+                    earth_url = generate_google_earth_url(lat, lon, altitude, distance, tilt, heading)
+                    print(f"Opening Google Earth: {earth_url}")
+                    driver.get(earth_url)
 
-                take_screenshot(driver, screenshot_filepath)
+                    screenshot_filename = f"{country}_{safe_name_part}_({lat:.4f},{lon:.4f}).png"
+                    screenshot_filepath = os.path.join(screenshot_dir, screenshot_filename)
 
-                print("Sending to Gemini for analysis...")
-                response = analyze_image_with_gemini(gemini_client, screenshot_filepath, country)
-                if response:
-                    print("\n--- GEMINI ANALYSIS ---")
-                    print(response)
-                    print("------------------------\n")
-                else:
-                    print("⚠️ No response from Gemini.")
+                    take_screenshot(driver, screenshot_filepath)
+
+                    print("Sending to Gemini for analysis...")
+                    response = analyze_image_with_gemini(gemini_client, screenshot_filepath, country)
+
+                    if response:
+                        print("\n--- GEMINI ANALYSIS ---")
+                        print(response)
+                        print("------------------------\n")
+                        
+                        # Check if the response contains an action to perform
+                        action = response.get("action")
+                        if action == "zoom-in":
+                            current_zoom -= 500  # Decrease the zoom level to zoom in
+                            altitude = current_zoom
+                        elif action == "zoom-out":
+                            current_zoom += 500  # Increase the zoom level to zoom out
+                            altitude = current_zoom
+                        elif action == "move-left":
+                            heading -= 10  # Move left by changing heading
+                        elif action == "move-right":
+                            heading += 10  # Move right by changing heading
+                        elif action == "finish":
+                            print("Analysis complete. No further actions required.")
+                            break
+
+                    else:
+                        print("⚠️ No response from Gemini.")
+                        break
 
             except ValueError as ve:
                 print(f"Invalid coordinates on row {index+1}: {ve}")
