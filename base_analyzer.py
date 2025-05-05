@@ -15,14 +15,15 @@ import requests
 load_dotenv()
 
 # --- Constants ---
-CSV_FILENAME = "military_bases.csv" # Assumes this file exists in the script's directory
-ROWS_TO_PROCESS = 1
+CSV_FILENAME = "military_bases.csv"  # Assumes this file exists in the script's directory
+ROWS_TO_PROCESS = 8
 SCREENSHOT_DIR = "base_screenshots"
 GOOGLE_EARTH_WAIT_TIME = 15
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.0-flash"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct"
+DATA_JSON_PATH = "data.json"
 
 # --- Gemini Helper Functions ---
 def setup_gemini_client(api_key: str) -> genai.Client:
@@ -56,8 +57,8 @@ def analyze_image_with_gemini(client: genai.Client, image_path: str, country: st
 
         response = client.models.generate_content(
             model=model_name,
-            contents=[uploaded_file, prompt,
-        ])
+            contents=[uploaded_file, prompt],
+        )
 
         # Extract text from the response correctly
         raw_text = response.candidates[0].content.parts[0].text.strip("```json\n").strip("```").strip()
@@ -65,7 +66,7 @@ def analyze_image_with_gemini(client: genai.Client, image_path: str, country: st
         # Try parsing the cleaned JSON
         try:
             parsed_response = json.loads(raw_text)
-            print("Parsed Gemini response:", parsed_response)
+            print("✅ Finished analyzing {base_name_part} ({lat:.4f}, {lon:.4f})\n")
             return parsed_response
         except json.JSONDecodeError as e:
             print(f"❌ Error parsing JSON response: {e}")
@@ -122,8 +123,7 @@ def generate_commander_report(history: list):
         "They have analyzed the same suspected enemy base from different perspectives. Here is what they said:\n\n"
         f"{history_text}\n\n"
         "Your task is to read all the analysis, synthesize key patterns, and produce a final military-grade summary.\n"
-        "Include:\n- Key confirmed and likely observations\n- Disagreements or uncertainties\n- Recommendations for further surveillance or action\n"
-        "Write your response as a clear report to the US military high command."
+        "Include:\n- Key confirmed and likely observations\n- Disagreements or uncertainties\n- Recommendations for further surveillance or action"
     )
 
     headers = {
@@ -141,13 +141,25 @@ def generate_commander_report(history: list):
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
         response.raise_for_status()
         commander_response = response.json()["choices"][0]["message"]["content"]
-        print("\n📋 --- COMMANDER FINAL REPORT ---")
-        print(commander_response)
-        print("---------------------------------\n")
+        print("\n📋 Commander report generated.")
         return commander_response
     except Exception as e:
         print(f"❌ Error generating commander report: {e}")
         return None
+
+# --- Persistent JSON Save/Load ---
+def load_existing_data():
+    if os.path.exists(DATA_JSON_PATH):
+        with open(DATA_JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_data_json(data):
+    with open(DATA_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def build_location_key(lat: float, lon: float) -> str:
+    return f"{lat:.6f},{lon:.6f}"
 
 # --- Main Processing Function ---
 def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_client: genai.Client):
@@ -167,6 +179,7 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
 
     os.makedirs(screenshot_dir, exist_ok=True)
     driver = setup_driver()
+    existing_data = load_existing_data()
 
     try:
         current_zoom = 1000  # initial zoom level
@@ -179,6 +192,12 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
             try:
                 lat = float(row['latitude'])
                 lon = float(row['longitude'])
+                loc_key = build_location_key(lat, lon)
+
+                if loc_key in existing_data:
+                    print(f"✅ Skipping already analyzed location: {loc_key}")
+                    continue
+
                 country = row.get('country', 'UnknownCountry')
                 base_name_part = row.get('name', f'Base_{index+1}')
                 safe_name_part = quote(base_name_part.replace(" ", "_"), safe='')
@@ -211,12 +230,12 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
                             current_zoom -= 500  # Decrease the zoom level to zoom in
                             altitude = current_zoom
                         elif action == "zoom-out":
-                            current_zoom += 500  # Increase the zoom level to zoom out
+                            current_zoom += 300  # Increase the zoom level to zoom out
                             altitude = current_zoom
                         elif action == "move-left":
                             heading -= 10  # Move left by changing heading
                         elif action == "move-right":
-                            heading += 10  # Move right by changing heading
+                            heading += 20
                         elif action == "finish":
                             print("Analysis complete. No further actions required.")
                             break
@@ -225,7 +244,17 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
                         print("⚠️ No response from Gemini.")
                         break
 
-                generate_commander_report(history_of_analysts)
+                commander_report = generate_commander_report(history_of_analysts)
+                existing_data[loc_key] = {
+                    "country": country,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "base_name": base_name_part,
+                    "analyst_history": history_of_analysts,
+                    "commander_report": commander_report
+                }
+                save_data_json(existing_data)
+                print(f"📦 Saved analysis to {DATA_JSON_PATH}")
 
             except ValueError as ve:
                 print(f"Invalid coordinates on row {index+1}: {ve}")
