@@ -16,7 +16,7 @@ load_dotenv()
 
 # --- Constants ---
 CSV_FILENAME = "military_bases.csv"  # Assumes this file exists in the script's directory
-ROWS_TO_PROCESS = 8
+ROWS_TO_PROCESS = 2
 SCREENSHOT_DIR = "base_screenshots"
 GOOGLE_EARTH_WAIT_TIME = 15
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -213,7 +213,7 @@ def process_bases(csv_path: str, num_rows: int, screenshot_dir: str, gemini_clie
                     print(f"Opening Google Earth: {earth_url}")
                     driver.get(earth_url)
 
-                    screenshot_filename = f"{country}_{safe_name_part}_({lat:.4f},{lon:.4f})_loop{loop_count}.png"
+                    screenshot_filename = f"{country}_{safe_name_part}_loop{loop_count}.png"
                     screenshot_filepath = os.path.join(screenshot_dir, screenshot_filename)
 
                     take_screenshot(driver, screenshot_filepath)
